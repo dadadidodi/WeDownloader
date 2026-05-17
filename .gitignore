@@ -1,0 +1,8 @@
+.env
+mp_login.txt
+mp_login.json
+archive/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
