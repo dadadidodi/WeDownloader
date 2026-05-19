@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import mimetypes
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -97,8 +99,18 @@ class AssetDownloader:
 
     def _fetch(self, url: str) -> Tuple[bytes, str]:
         request = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return response.read(), response.headers.get("Content-Type", "")
+        last_error = None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    return response.read(), response.headers.get("Content-Type", "")
+            except urllib.error.HTTPError:
+                raise
+            except (urllib.error.URLError, http.client.IncompleteRead) as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(1 + attempt)
+        raise last_error
 
     def _filename_for(self, url: str, content_type: str) -> str:
         parsed = urllib.parse.urlparse(url)

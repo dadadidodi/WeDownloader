@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import http.client
 import json
 import re
 import time
@@ -168,7 +169,7 @@ class MpBackendClient:
     def iter_raw_published(self, limit: Optional[int] = None) -> Iterator[Dict[str, Any]]:
         emitted = 0
         begin = 0
-        count = 20
+        count = 10
         while True:
             data = self.list_page(begin=begin, count=count)
             items = parse_article_list(data)
@@ -179,13 +180,59 @@ class MpBackendClient:
                 emitted += 1
                 if limit is not None and emitted >= limit:
                     return
-            begin += len(items)
+            page_entries = count_article_list_entries(data)
+            begin += count
             total = int(data.get("app_msg_cnt") or data.get("total_count") or 0)
-            if len(items) < count or (total and begin >= total):
+            if page_entries < count or (total and begin >= total):
                 break
 
     def list_page(self, begin: int, count: int = 20) -> Dict[str, Any]:
         errors: List[str] = []
+
+        publish_params: Dict[str, Any] = {
+            "sub": "list",
+            "begin": begin,
+            "count": count,
+            "token": self.session.token,
+            "lang": "zh_CN",
+            "f": "json",
+            "ajax": 1,
+        }
+        try:
+            data = self._request_json("/cgi-bin/appmsgpublish", publish_params)
+            if parse_article_list(data):
+                return data
+            if begin > 0:
+                return data
+            errors.append("browser publish endpoint returned no articles")
+        except MpBackendError as exc:
+            errors.append(str(exc))
+
+        legacy_publish_params: Dict[str, Any] = {
+            "sub": "list",
+            "search_field": "null",
+            "begin": begin,
+            "count": count,
+            "query": "",
+            "type": "101_1",
+            "free_publish_type": 1,
+            "sub_action": "list_ex",
+            "token": self.session.token,
+            "lang": "zh_CN",
+            "f": "json",
+            "ajax": 1,
+        }
+        if self.session.fakeid:
+            legacy_publish_params["fakeid"] = self.session.fakeid
+        try:
+            data = self._request_json("/cgi-bin/appmsgpublish", legacy_publish_params)
+            if parse_article_list(data):
+                return data
+            if begin > 0:
+                return data
+            errors.append("legacy publish endpoint returned no articles")
+        except MpBackendError as exc:
+            errors.append(str(exc))
 
         appmsg_params: Dict[str, Any] = {
             "action": "list_ex",
@@ -204,29 +251,6 @@ class MpBackendClient:
             data = self._request_json("/cgi-bin/appmsg", appmsg_params)
             if parse_article_list(data):
                 return data
-        except MpBackendError as exc:
-            errors.append(str(exc))
-
-        publish_params: Dict[str, Any] = {
-            "sub": "list",
-            "search_field": "null",
-            "begin": begin,
-            "count": count,
-            "query": "",
-            "type": "101_1",
-            "free_publish_type": 1,
-            "sub_action": "list_ex",
-            "token": self.session.token,
-            "lang": "zh_CN",
-            "f": "json",
-            "ajax": 1,
-        }
-        if self.session.fakeid:
-            publish_params["fakeid"] = self.session.fakeid
-        try:
-            data = self._request_json("/cgi-bin/appmsgpublish", publish_params)
-            if parse_article_list(data):
-                return data
             return data
         except MpBackendError as exc:
             errors.append(str(exc))
@@ -234,12 +258,12 @@ class MpBackendClient:
         raise MpBackendError("; ".join(errors) or "No backend article list endpoint worked.")
 
     def article_from_raw(self, raw: Dict[str, Any]) -> Article:
-        url = str(raw.get("link") or raw.get("url") or "")
+        url = str(raw.get("link") or raw.get("url") or raw.get("content_url") or "")
         content = str(raw.get("content") or "")
         title = html.unescape(str(raw.get("title") or ""))
         author = html.unescape(str(raw.get("author") or raw.get("author_name") or ""))
         digest = html.unescape(str(raw.get("digest") or ""))
-        update_time = int(raw.get("create_time") or raw.get("update_time") or raw.get("publish_time") or 0)
+        update_time = backend_article_time(raw)
 
         if url and not content:
             page = self.fetch_article_page(url)
@@ -249,13 +273,14 @@ class MpBackendClient:
             author = author or parsed.get("author", "")
             update_time = update_time or int(parsed.get("create_time") or 0)
 
-        source_id = source_id_from_url(url) or hashlib.sha256(
+        source_id = source_id_from_raw(raw) or source_id_from_url(url) or hashlib.sha256(
             json.dumps(raw, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest()[:16]
+        index = article_index_from_raw(raw)
         return Article(
             source="mp_published",
             source_id=source_id,
-            index=int(raw.get("idx") or 0),
+            index=index,
             title=title,
             author=author,
             digest=digest,
@@ -275,12 +300,13 @@ class MpBackendClient:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                return response.read().decode("utf-8", errors="replace")
+            return fetch_with_retries(request).decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             raise MpBackendError(classify_http_error(exc.code)) from exc
         except urllib.error.URLError as exc:
             raise MpBackendError(f"backend article request failed: {exc.reason}") from exc
+        except http.client.IncompleteRead as exc:
+            raise MpBackendError(f"backend article request incomplete: {exc}") from exc
 
     def _request_json(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{MP_BASE}{path}?{urllib.parse.urlencode(params)}"
@@ -294,12 +320,13 @@ class MpBackendClient:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                raw = response.read().decode("utf-8", errors="replace")
+            raw = fetch_with_retries(request).decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             raise MpBackendError(classify_http_error(exc.code)) from exc
         except urllib.error.URLError as exc:
             raise MpBackendError(f"backend request failed: {exc.reason}") from exc
+        except http.client.IncompleteRead as exc:
+            raise MpBackendError(f"backend request incomplete: {exc}") from exc
 
         try:
             data = json.loads(raw)
@@ -314,6 +341,23 @@ class MpBackendClient:
             err_msg = str(base_resp.get("err_msg") or data.get("errmsg") or data.get("msg") or "")
             raise MpBackendError(classify_backend_error(ret, err_msg))
         return data
+
+
+def fetch_with_retries(request: urllib.request.Request, attempts: int = 3) -> bytes:
+    last_error: Optional[BaseException] = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.read()
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, http.client.IncompleteRead) as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                time.sleep(1 + attempt)
+    if last_error:
+        raise last_error
+    return b""
 
 
 def parse_article_list(data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -335,6 +379,28 @@ def parse_article_list(data: Dict[str, Any]) -> List[Dict[str, Any]]:
         return flatten_publish_list(publish_list)
 
     return []
+
+
+def count_article_list_entries(data: Dict[str, Any]) -> int:
+    """Return the backend page entry count before multi-article messages are flattened."""
+    if isinstance(data.get("app_msg_list"), list):
+        return len(data["app_msg_list"])
+
+    publish_page = data.get("publish_page")
+    if isinstance(publish_page, str) and publish_page:
+        try:
+            page_data = json.loads(publish_page)
+        except json.JSONDecodeError:
+            page_data = {}
+        publish_list = page_data.get("publish_list")
+        if isinstance(publish_list, list):
+            return len(publish_list)
+
+    publish_list = data.get("publish_list")
+    if isinstance(publish_list, list):
+        return len(publish_list)
+
+    return 0
 
 
 def flatten_publish_list(publish_list: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -397,6 +463,47 @@ def extract_title(page: str) -> str:
 def extract_create_time(page: str) -> int:
     match = re.search(r"var\s+createTime\s*=\s*['\"]?(\d{10})", page)
     return int(match.group(1)) if match else 0
+
+
+def backend_article_time(raw: Dict[str, Any]) -> int:
+    for value in (
+        raw.get("create_time"),
+        raw.get("update_time"),
+        raw.get("publish_time"),
+        nested_int(raw, "line_info", "send_time"),
+        nested_int(raw, "private_info", "update_time"),
+    ):
+        if value:
+            return int(value)
+    return 0
+
+
+def article_index_from_raw(raw: Dict[str, Any]) -> int:
+    for key in ("idx", "itemidx"):
+        value = raw.get(key)
+        if value in (None, ""):
+            continue
+        index = int(value)
+        return max(index - 1, 0) if key == "itemidx" else index
+    return 0
+
+
+def nested_int(raw: Dict[str, Any], parent: str, key: str) -> int:
+    value = raw.get(parent)
+    if not isinstance(value, dict):
+        return 0
+    try:
+        return int(value.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def source_id_from_raw(raw: Dict[str, Any]) -> str:
+    for key in ("appmsgid", "aid", "appmsg_id"):
+        value = raw.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return ""
 
 
 def source_id_from_url(url: str) -> str:

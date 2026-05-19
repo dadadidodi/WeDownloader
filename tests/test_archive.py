@@ -5,7 +5,15 @@ import unittest
 from pathlib import Path
 
 from wedownloader.cli import clean_run_outputs
-from wedownloader.archive import Archiver, extract_articles, sanitize_filename
+from wedownloader.archive import (
+    Archiver,
+    Article,
+    article_record_identity,
+    dedupe_article_records,
+    extract_articles,
+    sanitize_filename,
+    validate_workers,
+)
 from wedownloader.wechat import WeChatApiError
 
 
@@ -115,6 +123,7 @@ class ArchiveTests(unittest.TestCase):
                     include_published=True,
                     include_drafts=False,
                     limit=None,
+                    workers=1,
                 )
 
             progress = archiver.progress.data
@@ -128,6 +137,48 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(progress["counters"]["assets_downloaded"], 1)
         self.assertEqual(progress["counters"]["assets_needs_manual_fetch"], 1)
         self.assertEqual(progress["recent_errors"][0]["error"], "asset exploded")
+
+    def test_parallel_archive_updates_manifest_from_main_thread(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archiver = Archiver(FakeClient(), Path(temp_dir))
+            articles = [
+                Article("mp_published", "1", 0, "A", "", "", "<p>A</p>", "", 1, {}),
+                Article("mp_published", "2", 0, "B", "", "", "<p>B</p>", "", 1, {}),
+                Article("mp_published", "3", 0, "C", "", "", "<p>C</p>", "", 1, {}),
+            ]
+
+            def fake_write_article(article, asset_downloader=None):
+                if article.title == "B":
+                    raise RuntimeError("boom")
+                return {
+                    "key": article.key,
+                    "source": article.source,
+                    "source_id": article.source_id,
+                    "index": article.index,
+                    "title": article.title,
+                    "author": "",
+                    "digest": "",
+                    "url": "",
+                    "update_time": 1,
+                    "path": f"{article.title}/index.html",
+                    "metadata_path": f"{article.title}/metadata.json",
+                    "assets": [{"url": f"https://example.com/{article.title}.jpg", "status": "downloaded"}],
+                }
+
+            archiver.write_article = fake_write_article
+            archiver.progress.start_run({"workers": 3})
+            archiver.progress.set_articles_discovered(3)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                count, records = archiver.archive_articles(
+                    articles, show_progress=False, workers=3
+                )
+
+        self.assertEqual(count, 3)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(archiver.progress.data["counters"]["items_succeeded"], 2)
+        self.assertEqual(archiver.progress.data["counters"]["items_failed"], 1)
+        self.assertEqual(len(archiver.manifest.data["articles"]), 2)
 
     def test_write_index_also_writes_readable_manifest(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -155,6 +206,49 @@ class ArchiveTests(unittest.TestCase):
         self.assertIn("中文标题", readable)
         self.assertIn('"资源下载成功": 1', readable)
 
+    def test_mp_published_identity_matches_full_and_backend_urls(self):
+        old_record = {
+            "source": "mp_published",
+            "source_id": "MzU4MDg0MTk4Nw==_2247486329_1",
+            "index": 0,
+            "title": "A",
+            "url": "http://mp.weixin.qq.com/s?__biz=MzU4MDg0MTk4Nw==&mid=2247486329&idx=1&sn=x#rd",
+        }
+        new_record = {
+            "source": "mp_published",
+            "source_id": "2247486329",
+            "index": 0,
+            "title": "A",
+            "url": "https://mp.weixin.qq.com/s/short",
+        }
+
+        self.assertEqual(article_record_identity(old_record), article_record_identity(new_record))
+
+    def test_dedupe_article_records_prefers_richer_record(self):
+        records = [
+            {
+                "source": "mp_published",
+                "source_id": "2247486329",
+                "index": 0,
+                "title": "A",
+                "url": "",
+                "update_time": 0,
+            },
+            {
+                "source": "mp_published",
+                "source_id": "2247486329",
+                "index": 0,
+                "title": "A",
+                "url": "https://mp.weixin.qq.com/s/short",
+                "update_time": 1770000000,
+            },
+        ]
+
+        deduped = dedupe_article_records(records)
+
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["url"], "https://mp.weixin.qq.com/s/short")
+
     def test_published_48001_does_not_block_drafts(self):
         archiver = Archiver(UnauthorizedPublishedClient(), Path("/tmp/wedownloader-test"))
 
@@ -179,6 +273,10 @@ class ArchiveTests(unittest.TestCase):
             self.assertFalse((archive / "manifest.json").exists())
             self.assertTrue((archive / "mp_session.json").exists())
             self.assertTrue(any("articles" in item for item in removed))
+
+    def test_validate_workers_rejects_zero(self):
+        with self.assertRaises(ValueError):
+            validate_workers(0)
 
 
 if __name__ == "__main__":

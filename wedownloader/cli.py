@@ -3,15 +3,18 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, List, Optional
 
-from .archive import Archiver
+from .archive import Archiver, validate_workers
 from .config import load_settings
+from .html_assets import AssetDownloader
 from .mp_backend import (
     MpBackendClient,
     MpBackendError,
     MpSession,
+    backend_article_time,
     save_session_from_file,
     save_session_interactively,
 )
@@ -37,6 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dry-run", action="store_true", help="List articles without downloading.")
     parser.add_argument("--limit", type=int, default=None, help="Maximum article count to process.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=3,
+        help="Article download worker count. Default: 3. Use 1 for serial mode.",
+    )
     parser.add_argument(
         "--published-only",
         action="store_true",
@@ -121,6 +130,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 args.limit,
                 download_image_materials=args.download_image_materials,
                 show_progress=args.progress,
+                workers=args.workers,
             )
     except (ValueError, WeChatApiError) as exc:
         print(f"Error: {exc}")
@@ -151,6 +161,12 @@ def build_mp_parser(command: str) -> argparse.ArgumentParser:
         parser.add_argument("--dry-run", action="store_true", help="List only; do not download.")
     if command == "mp-download":
         parser.add_argument("--progress", action="store_true", help="Print live progress.")
+        parser.add_argument(
+            "--workers",
+            type=int,
+            default=3,
+            help="Article download worker count. Default: 3. Use 1 for serial mode.",
+        )
     return parser
 
 
@@ -189,9 +205,9 @@ def main_mp(argv: list[str]) -> int:
             count = 0
             for raw in client.iter_raw_published(limit=args.limit):
                 count += 1
-                title = raw.get("title") or raw.get("digest") or raw.get("link") or "(untitled)"
-                create_time = raw.get("create_time") or raw.get("update_time") or raw.get("publish_time") or ""
-                print(f"[mp_published] {create_time} {title}")
+                title, _ = mp_raw_title_key(raw)
+                publish_time = backend_article_time(raw) or ""
+                print(f"[mp_published] {publish_time} {title}")
             print(f"Total: {count}")
             return 0
 
@@ -201,6 +217,7 @@ def main_mp(argv: list[str]) -> int:
                 archive_dir=archive_dir,
                 limit=args.limit,
                 show_progress=args.progress,
+                workers=args.workers,
             )
             print(f"Done. Processed {count} mp published article(s).")
             return 0
@@ -219,7 +236,9 @@ def run_mp_download(
     archive_dir: Path,
     limit: Optional[int],
     show_progress: bool,
+    workers: int = 3,
 ) -> int:
+    validate_workers(workers)
     archiver = Archiver(client, archive_dir)
     archiver.progress = ProgressTracker(archive_dir / "progress.json", enabled=show_progress)
     archiver.progress.start_run(
@@ -229,6 +248,7 @@ def run_mp_download(
             "include_drafts": False,
             "limit": limit,
             "download_image_materials": False,
+            "workers": workers,
         }
     )
     count = 0
@@ -237,25 +257,14 @@ def run_mp_download(
         raw_articles = list(client.iter_raw_published(limit=limit))
         archiver.progress.set_articles_discovered(len(raw_articles))
         archiver.progress.set_phase("articles")
-        for raw in raw_articles:
-            title = str(raw.get("title") or raw.get("digest") or raw.get("link") or "(untitled)")
-            key = str(raw.get("aid") or raw.get("appmsgid") or raw.get("link") or title)
-            count += 1
-            archiver.progress.start_item("article", title, key)
-            try:
-                article = client.article_from_raw(raw)
-                record = archiver.write_article(article)
-            except Exception as exc:
-                archiver.progress.fail_item("article", title, key, str(exc))
-                print(f"Failed [mp_published] {title}: {exc}")
-                continue
-            records.append(record)
-            archiver.manifest.record_article(article.key, record)
-            archiver.manifest.save()
-            archiver.progress.record_assets(record.get("assets", []))
-            archiver.progress.finish_item("article", article.title, article.key)
-            if not show_progress:
-                print(f"Saved [mp_published] {article.title}")
+        if workers == 1:
+            count, records = archive_mp_raw_serial(
+                archiver, client, raw_articles, show_progress
+            )
+        else:
+            count, records = archive_mp_raw_parallel(
+                archiver, client, raw_articles, show_progress, workers
+            )
         archiver.progress.set_phase("index")
         archiver.write_index(records)
         archiver.manifest.save()
@@ -264,6 +273,91 @@ def run_mp_download(
     except Exception as exc:
         archiver.progress.fail_run(str(exc))
         raise
+
+
+def archive_mp_raw_serial(
+    archiver: Archiver,
+    client: Any,
+    raw_articles: List[dict[str, Any]],
+    show_progress: bool,
+) -> tuple[int, List[dict[str, Any]]]:
+    count = 0
+    records: List[dict[str, Any]] = []
+    for raw in raw_articles:
+        title, key = mp_raw_title_key(raw)
+        count += 1
+        archiver.progress.start_item("article", title, key)
+        try:
+            article = client.article_from_raw(raw)
+            record = archiver.write_article(article)
+        except Exception as exc:
+            archiver.progress.fail_item("article", title, key, str(exc))
+            print(f"Failed [mp_published] {title}: {exc}")
+            continue
+        records.append(record)
+        archiver.record_article_result(article, record)
+        if not show_progress:
+            print(f"Saved [mp_published] {article.title}")
+    return count, records
+
+
+def archive_mp_raw_parallel(
+    archiver: Archiver,
+    client: Any,
+    raw_articles: List[dict[str, Any]],
+    show_progress: bool,
+    workers: int,
+) -> tuple[int, List[dict[str, Any]]]:
+    count = 0
+    records: List[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+        for raw in raw_articles:
+            title, key = mp_raw_title_key(raw)
+            archiver.progress.start_item("article", title, key)
+            future = executor.submit(download_mp_raw_article, archiver, client, raw)
+            futures[future] = (title, key)
+
+        for future in as_completed(futures):
+            title, key = futures[future]
+            count += 1
+            try:
+                article, record = future.result()
+            except Exception as exc:
+                archiver.progress.fail_item("article", title, key, str(exc))
+                print(f"Failed [mp_published] {title}: {exc}")
+                continue
+            records.append(record)
+            archiver.record_article_result(article, record)
+            if not show_progress:
+                print(f"Saved [mp_published] {article.title}")
+    return count, records
+
+
+def download_mp_raw_article(
+    archiver: Archiver, client: Any, raw: dict[str, Any]
+) -> tuple[Any, dict[str, Any]]:
+    article = client.article_from_raw(raw)
+    record = archiver.write_article(article, AssetDownloader())
+    return article, record
+
+
+def mp_raw_title_key(raw: dict[str, Any]) -> tuple[str, str]:
+    title = str(
+        raw.get("title")
+        or raw.get("digest")
+        or raw.get("link")
+        or raw.get("content_url")
+        or "(untitled)"
+    )
+    key = str(
+        raw.get("aid")
+        or raw.get("appmsgid")
+        or raw.get("link")
+        or raw.get("content_url")
+        or title
+    )
+    return title, key
 
 
 def clean_run_outputs(archive_dir: Path, remove_session: bool = False) -> List[str]:

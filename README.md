@@ -113,6 +113,18 @@ python3 -m wedownloader --progress
 - 草稿/未发布图文
 - 正文里的图片等资源
 
+默认会用 3 个文章下载线程。想更稳可以降到单线程：
+
+```bash
+python3 -m wedownloader --workers 1 --progress
+```
+
+想稍快一点可以显式提高，但不建议超过 5，避免触发微信频控：
+
+```bash
+python3 -m wedownloader --workers 5 --progress
+```
+
 ### 5. 可选运行方式
 
 只处理已发布内容：
@@ -170,6 +182,14 @@ python3 -m wedownloader --clean-runs --clean-session
 这个模式只面向你自己管理的公众号：不搜索他人公众号，不需要抓别人内容。
 
 你当前这个公众号已经验证过：官方草稿接口可用，官方已发布接口无权限；所以已发表文章建议直接走本节的 `mp-login` / `mp-list` / `mp-download` 流程。
+
+后台已发表文章列表使用你登录公众号后台时页面实际请求的接口：
+
+```text
+/cgi-bin/appmsgpublish?sub=list&begin=...&count=10
+```
+
+这里的 `count=10` 是 10 条“发表记录”，不是 10 篇展开后的文章。一条多图文发表记录可能包含多篇子文章，工具会把每一篇子文章单独归档为一个 article item。
 
 ### 1. 保存后台登录态
 
@@ -249,6 +269,25 @@ python3 -m wedownloader mp-download --limit 3 --progress
 python3 -m wedownloader mp-download --progress
 ```
 
+`mp-download` 默认也使用 3 个文章下载线程。后台文章列表分页仍然串行，只并发每篇文章正文和图片资源的下载。更稳的排查模式：
+
+```bash
+python3 -m wedownloader mp-download --workers 1 --progress
+```
+
+更快但更可能遇到微信频控：
+
+```bash
+python3 -m wedownloader mp-download --workers 5 --progress
+```
+
+如果你想完全重新下载一遍，不叠加旧文件，先清理运行产物但保留后台登录态：
+
+```bash
+python3 -m wedownloader --clean-runs
+python3 -m wedownloader mp-download --progress
+```
+
 ## 输出内容
 
 输出目录默认是 `archive/`：
@@ -266,6 +305,18 @@ python3 -m wedownloader mp-download --progress
 `manifest.json` 会记录每篇文章和资源的下载状态。重新运行时不会删除已有文件，可以作为排查失败资源的清单。
 
 如果只是想看中文标题、文章路径和资源统计，优先打开 `archive/articles_readable.json` 或 `archive/index.html`。`manifest.json` 里的 `MzU4...` 不是乱码，而是微信 URL 里的公众号/文章标识。
+
+单篇文章路径一般长这样：
+
+```text
+archive/articles/mp_published/<文章ID>/<子文章序号>/index.html
+```
+
+例如某篇后台文章可能会保存到：
+
+```text
+archive/articles/mp_published/2247485787/0/index.html
+```
 
 ## 清理输出
 
@@ -331,6 +382,25 @@ python3 -m wedownloader --status
 
 `--status` 只读取 `archive/progress.json`，不会访问微信接口，也不需要 `.env`。
 
+## 并发下载
+
+文章下载支持 `--workers N`。默认值是 3，适合 macOS 本地跑一百多篇文章：比单线程快，又不会过分打微信后台或图片 CDN。
+
+并发粒度是“文章级”：
+
+- 主线程先拉完整文章列表。
+- 多个 worker 并发下载不同文章的正文和图片。
+- `manifest.json`、`progress.json`、`index.html` 仍由主线程写入。
+- 永久素材下载暂时保持串行。
+
+推荐值：
+
+- `--workers 1`：最稳，适合排查问题。
+- `--workers 3`：默认值，推荐日常使用。
+- `--workers 5`：更快，但更可能触发微信频控。
+
+超过 5 会打印 warning，但仍允许你显式使用。
+
 ## 推荐流程
 
 第一次使用建议按这个顺序：
@@ -362,10 +432,15 @@ python3 -m wedownloader mp-download --progress
 如果文章数量和后台不一致，先运行：
 
 ```bash
-python3 -m wedownloader --dry-run
+python3 -m wedownloader mp-list --dry-run
 ```
 
-确认官方接口返回的发布记录和草稿数量，再决定是否需要补充素材库导出流程。
+确认后台真实列表能否看到对应标题。后台列表能看到但归档首页没有时，优先执行：
+
+```bash
+python3 -m wedownloader --clean-runs
+python3 -m wedownloader mp-download --progress
+```
 
 如果看到 `48001 api unauthorized`，说明官方已发布文章接口没有权限。草稿和素材仍可继续用官方 API；已发表文章请改用：
 

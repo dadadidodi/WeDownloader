@@ -2,6 +2,7 @@
 mp_login.txt
 mp_login.json
 archive/
+renliangmiliang/
 __pycache__/
 *.py[cod]
 .pytest_cache/
