@@ -21,6 +21,11 @@ CSS_URL_RE = re.compile(
     r"""url\((?P<quote>["']?)(?P<url>https?://[^"')]+)(?P=quote)\)""",
     re.IGNORECASE,
 )
+ALLOWED_ASSET_HOSTS = {
+    "mmbiz.qpic.cn",
+    "mmbiz.qlogo.cn",
+    "res.wx.qq.com",
+}
 
 
 @dataclass
@@ -46,6 +51,9 @@ class AssetDownloader:
                 return match.group(0)
             if attr_name == "href" and not self._looks_like_asset_url(url):
                 return match.group(0)
+            if not self._is_allowed_asset_host(url):
+                self._record_skipped(url, results)
+                return match.group(0)
             result = self._download_once(url, assets_dir, results, local_prefix="assets")
             replacement = result.local_path if result.status == "downloaded" else url
             output_attr = "src=" if attr_name == "data-src" else match.group("attr")
@@ -54,6 +62,9 @@ class AssetDownloader:
         def css_replace(match: re.Match) -> str:
             url = self._clean_url(match.group("url"))
             if self._should_ignore_url(url):
+                return match.group(0)
+            if not self._is_allowed_asset_host(url):
+                self._record_skipped(url, results)
                 return match.group(0)
             result = self._download_once(url, assets_dir, results, local_prefix="assets")
             replacement = result.local_path if result.status == "downloaded" else url
@@ -69,6 +80,8 @@ class AssetDownloader:
         cleaned = self._clean_url(url)
         if self._should_ignore_url(cleaned):
             return AssetResult(url=cleaned, status="ignored")
+        if not self._is_allowed_asset_host(cleaned):
+            return AssetResult(url=cleaned, status="skipped", error="host not in asset allowlist")
         return self._download_once(cleaned, assets_dir, {}, local_prefix="")
 
     def _download_once(
@@ -96,6 +109,15 @@ class AssetDownloader:
 
         results[url] = result
         return result
+
+    def _record_skipped(self, url: str, results: Dict[str, AssetResult]) -> AssetResult:
+        if url not in results:
+            results[url] = AssetResult(
+                url=url,
+                status="skipped",
+                error="host not in asset allowlist",
+            )
+        return results[url]
 
     def _fetch(self, url: str) -> Tuple[bytes, str]:
         request = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
@@ -147,6 +169,11 @@ class AssetDownloader:
                 ".webm",
             )
         )
+
+    def _is_allowed_asset_host(self, url: str) -> bool:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.lower()
+        return host in ALLOWED_ASSET_HOSTS
 
     def _should_ignore_url(self, url: str) -> bool:
         parsed = urllib.parse.urlparse(url)

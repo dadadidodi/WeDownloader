@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict
 
+from .storage import write_json_atomic
+
 
 class Manifest:
     def __init__(self, path: Path):
@@ -24,15 +26,10 @@ class Manifest:
             self.data.setdefault("assets", {})
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(self.data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_json_atomic(self.path, self.data)
 
     def record_article(self, key: str, metadata: Dict[str, Any]) -> None:
         self.data["articles"][key] = metadata
 
     def record_asset(self, url: str, metadata: Dict[str, Any]) -> None:
         self.data["assets"][url] = metadata
-

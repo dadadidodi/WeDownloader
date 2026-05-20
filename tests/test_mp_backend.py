@@ -1,5 +1,6 @@
 import contextlib
 import io
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +30,15 @@ class MpBackendTests(unittest.TestCase):
 
         self.assertEqual(loaded.token, "123")
         self.assertEqual(loaded.cookie, "a=b")
+
+    def test_session_file_is_private(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "mp_session.json"
+            MpSession(token="123", cookie="a=b", login_at=1710000000).save(path)
+
+            mode = stat.S_IMODE(path.stat().st_mode)
+
+        self.assertEqual(mode, 0o600)
 
     def test_extract_token_from_url_or_plain_value(self):
         self.assertEqual(extract_token("https://mp.weixin.qq.com/?token=123&lang=zh_CN"), "123")

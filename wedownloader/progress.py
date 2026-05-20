@@ -6,6 +6,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .storage import write_json_atomic
+
 
 RECENT_ERROR_LIMIT = 20
 
@@ -61,17 +63,22 @@ class ProgressTracker:
         self.data.setdefault("counters", {})["articles_discovered"] = count
         self.save()
 
-    def start_item(self, item_type: str, title: str, key: str) -> None:
+    def start_item(
+        self, item_type: str, title: str, key: str, save: bool = True
+    ) -> None:
         self.data["current_item"] = {
             "type": item_type,
             "title": title,
             "key": key,
             "started_at": current_timestamp(),
         }
-        self.save()
+        if save:
+            self.save()
         self._print(f"Processing {item_type}: {title or key}")
 
-    def finish_item(self, item_type: str, title: str, key: str) -> None:
+    def finish_item(
+        self, item_type: str, title: str, key: str, save: bool = True
+    ) -> None:
         counters = self.data.setdefault("counters", {})
         counters["items_processed"] = int(counters.get("items_processed", 0)) + 1
         counters["items_succeeded"] = int(counters.get("items_succeeded", 0)) + 1
@@ -82,7 +89,8 @@ class ProgressTracker:
             "finished_at": current_timestamp(),
             "status": "succeeded",
         }
-        self.save()
+        if save:
+            self.save()
         self._print_summary(prefix="Saved")
 
     def fail_item(self, item_type: str, title: str, key: str, error: str) -> None:
@@ -100,7 +108,7 @@ class ProgressTracker:
         self.save()
         self._print_summary(prefix="Failed")
 
-    def record_assets(self, assets: List[Dict[str, Any]]) -> None:
+    def record_assets(self, assets: List[Dict[str, Any]], save: bool = True) -> None:
         counters = self.data.setdefault("counters", {})
         for asset in assets:
             status = asset.get("status")
@@ -110,10 +118,13 @@ class ProgressTracker:
                 key = "assets_downloaded"
             elif status == "needs_manual_fetch":
                 key = "assets_needs_manual_fetch"
+            elif status == "skipped":
+                key = "assets_needs_manual_fetch"
             else:
                 key = "assets_failed"
             counters[key] = int(counters.get(key, 0)) + 1
-        self.save()
+        if save:
+            self.save()
 
     def add_error(
         self,
@@ -152,11 +163,7 @@ class ProgressTracker:
         self._print(f"Run failed: {error}")
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(self.data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_json_atomic(self.path, self.data)
 
     def summary(self) -> str:
         if not self.data:

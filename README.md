@@ -241,6 +241,8 @@ COOKIE=xxx=yyy; xxx=yyy; ...
 
 注意：`Cookie` 和 `archive/mp_session.json` 都相当于后台登录态，不要发给别人，不要提交到 Git。
 
+工具保存登录态后，命令行只会显示脱敏 token，例如 `*****1234`，不会完整打印后台 token。
+
 ### 2. 检查登录态
 
 ```bash
@@ -305,6 +307,13 @@ python3 -m wedownloader mp-download --progress
 `manifest.json` 会记录每篇文章和资源的下载状态。重新运行时不会删除已有文件，可以作为排查失败资源的清单。
 
 如果只是想看中文标题、文章路径和资源统计，优先打开 `archive/articles_readable.json` 或 `archive/index.html`。`manifest.json` 里的 `MzU4...` 不是乱码，而是微信 URL 里的公众号/文章标识。
+
+敏感文件会以仅当前用户可读写的权限保存：
+
+- `archive/mp_session.json`
+- `archive/.access_token.json`
+
+这些文件已经被 `.gitignore` 忽略。工具写入 `manifest.json`、`progress.json`、登录态和 access token 时会使用临时文件原子替换，避免中途退出留下半截 JSON。
 
 单篇文章路径一般长这样：
 
@@ -391,6 +400,7 @@ python3 -m wedownloader --status
 - 主线程先拉完整文章列表。
 - 多个 worker 并发下载不同文章的正文和图片。
 - `manifest.json`、`progress.json`、`index.html` 仍由主线程写入。
+- `manifest.json`、`progress.json` 会批量保存，减少一百多篇文章下载时的磁盘写入。
 - 永久素材下载暂时保持串行。
 
 推荐值：
@@ -428,6 +438,8 @@ python3 -m wedownloader mp-download --progress
 如果看到 `invalid ip` 或类似错误，通常是公众号后台没有配置当前公网 IP 白名单。
 
 如果某些资源记录为 `needs_manual_fetch`，说明资源需要额外登录态或权限。工具会保留原链接并在 manifest 中记录，不会尝试绕过权限。
+
+正文资源下载默认只处理微信相关资源域名，例如 `mmbiz.qpic.cn`、`mmbiz.qlogo.cn`、`res.wx.qq.com`。其他外部域名会保留原链接并记录为需要人工确认，避免意外请求不相关站点。
 
 如果文章数量和后台不一致，先运行：
 

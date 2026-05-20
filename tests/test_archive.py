@@ -85,6 +85,16 @@ class Asset:
         self.error = ""
 
 
+class SaveCounter:
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        self.wrapped()
+
+
 class ArchiveTests(unittest.TestCase):
     def test_extract_articles_from_draft_shape(self):
         item = {
@@ -179,6 +189,26 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(archiver.progress.data["counters"]["items_succeeded"], 2)
         self.assertEqual(archiver.progress.data["counters"]["items_failed"], 1)
         self.assertEqual(len(archiver.manifest.data["articles"]), 2)
+
+    def test_archive_batches_manifest_saves(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archiver = Archiver(FakeClient(), Path(temp_dir))
+            archiver.manifest.save = SaveCounter(archiver.manifest.save)
+            archiver.progress.save = SaveCounter(archiver.progress.save)
+            articles = [
+                Article("mp_published", str(index), 0, f"A{index}", "", "", "<p>A</p>", "", 1, {})
+                for index in range(9)
+            ]
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                count, records = archiver.archive_articles(
+                    articles, show_progress=False, workers=1
+                )
+
+        self.assertEqual(count, 9)
+        self.assertEqual(len(records), 9)
+        self.assertEqual(archiver.manifest.save.calls, 1)
+        self.assertEqual(archiver.progress.save.calls, 1)
 
     def test_write_index_also_writes_readable_manifest(self):
         with tempfile.TemporaryDirectory() as temp_dir:

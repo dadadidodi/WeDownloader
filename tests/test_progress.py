@@ -27,6 +27,7 @@ class ProgressTests(unittest.TestCase):
                     {"status": "downloaded"},
                     {"status": "failed"},
                     {"status": "needs_manual_fetch"},
+                    {"status": "skipped"},
                 ]
             )
             tracker.finish_item("article", "标题", "draft:1:0")
@@ -40,7 +41,7 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(loaded.data["counters"]["items_succeeded"], 1)
         self.assertEqual(loaded.data["counters"]["assets_downloaded"], 1)
         self.assertEqual(loaded.data["counters"]["assets_failed"], 1)
-        self.assertEqual(loaded.data["counters"]["assets_needs_manual_fetch"], 1)
+        self.assertEqual(loaded.data["counters"]["assets_needs_manual_fetch"], 2)
 
     def test_fail_item_records_recent_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -57,4 +58,3 @@ class ProgressTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

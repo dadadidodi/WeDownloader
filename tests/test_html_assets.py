@@ -49,6 +49,15 @@ class HtmlAssetTests(unittest.TestCase):
         self.assertEqual(len(assets), 1)
         self.assertEqual(assets[0].status, "downloaded")
 
+    def test_skips_asset_like_url_on_untrusted_host(self):
+        html = '<img src="https://example.com/a.jpg">'
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rewritten, assets = FakeDownloader().localize_html(html, Path(temp_dir))
+
+        self.assertIn('src="https://example.com/a.jpg"', rewritten)
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0].status, "skipped")
+
 
 if __name__ == "__main__":
     unittest.main()

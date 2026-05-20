@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, List, Optional
 
-from .archive import Archiver, validate_workers
+from .archive import Archiver, SAVE_EVERY_N_ARTICLES, validate_workers
 from .config import load_settings
 from .html_assets import AssetDownloader
 from .mp_backend import (
@@ -188,7 +188,7 @@ def main_mp(argv: list[str]) -> int:
             else:
                 session = save_session_interactively(session_path)
             print(f"Saved backend session to {session_path}")
-            print(f"Token: {session.token}; fakeid: {session.fakeid or '(empty)'}")
+            print(f"Token: {mask_secret(session.token)}; fakeid: {session.fakeid or '(empty)'}")
             return 0
 
         session = MpSession.load(session_path)
@@ -198,7 +198,7 @@ def main_mp(argv: list[str]) -> int:
             client.list_page(begin=0, count=1)
             print("Backend session looks usable.")
             print(f"Session age: {session.age_seconds()} seconds")
-            print(f"Token: {session.token}; fakeid: {session.fakeid or '(empty)'}")
+            print(f"Token: {mask_secret(session.token)}; fakeid: {session.fakeid or '(empty)'}")
             return 0
 
         if command == "mp-list":
@@ -282,11 +282,12 @@ def archive_mp_raw_serial(
     show_progress: bool,
 ) -> tuple[int, List[dict[str, Any]]]:
     count = 0
+    successful = 0
     records: List[dict[str, Any]] = []
     for raw in raw_articles:
         title, key = mp_raw_title_key(raw)
         count += 1
-        archiver.progress.start_item("article", title, key)
+        archiver.progress.start_item("article", title, key, save=False)
         try:
             article = client.article_from_raw(raw)
             record = archiver.write_article(article)
@@ -295,9 +296,16 @@ def archive_mp_raw_serial(
             print(f"Failed [mp_published] {title}: {exc}")
             continue
         records.append(record)
-        archiver.record_article_result(article, record)
+        successful += 1
+        archiver.record_article_result(
+            article,
+            record,
+            save_now=successful % SAVE_EVERY_N_ARTICLES == 0,
+        )
         if not show_progress:
             print(f"Saved [mp_published] {article.title}")
+    archiver.manifest.save()
+    archiver.progress.save()
     return count, records
 
 
@@ -309,12 +317,13 @@ def archive_mp_raw_parallel(
     workers: int,
 ) -> tuple[int, List[dict[str, Any]]]:
     count = 0
+    successful = 0
     records: List[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {}
         for raw in raw_articles:
             title, key = mp_raw_title_key(raw)
-            archiver.progress.start_item("article", title, key)
+            archiver.progress.start_item("article", title, key, save=False)
             future = executor.submit(download_mp_raw_article, archiver, client, raw)
             futures[future] = (title, key)
 
@@ -328,9 +337,16 @@ def archive_mp_raw_parallel(
                 print(f"Failed [mp_published] {title}: {exc}")
                 continue
             records.append(record)
-            archiver.record_article_result(article, record)
+            successful += 1
+            archiver.record_article_result(
+                article,
+                record,
+                save_now=successful % SAVE_EVERY_N_ARTICLES == 0,
+            )
             if not show_progress:
                 print(f"Saved [mp_published] {article.title}")
+    archiver.manifest.save()
+    archiver.progress.save()
     return count, records
 
 
@@ -358,6 +374,14 @@ def mp_raw_title_key(raw: dict[str, Any]) -> tuple[str, str]:
         or title
     )
     return title, key
+
+
+def mask_secret(value: str, visible: int = 4) -> str:
+    if not value:
+        return "(empty)"
+    if len(value) <= visible:
+        return "*" * len(value)
+    return f"{'*' * (len(value) - visible)}{value[-visible:]}"
 
 
 def clean_run_outputs(archive_dir: Path, remove_session: bool = False) -> List[str]:

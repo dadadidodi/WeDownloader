@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from .storage import write_json_atomic
+
 
 API_BASE = "https://api.weixin.qq.com"
 
@@ -39,14 +41,10 @@ class TokenCache:
         return cls(access_token=token, expires_at=expires_at)
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {"access_token": self.access_token, "expires_at": self.expires_at},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        write_json_atomic(
+            path,
+            {"access_token": self.access_token, "expires_at": self.expires_at},
+            private=True,
         )
 
 
@@ -177,4 +175,3 @@ class WeChatClient:
             errmsg = data.get("errmsg", "unknown error")
             raise WeChatApiError(f"WeChat API error {errcode}: {errmsg}", data)
         return data
-

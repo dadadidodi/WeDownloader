@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import json
 import re
 import time
 import urllib.parse
@@ -13,7 +12,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from .html_assets import AssetDownloader, AssetResult
 from .manifest import Manifest
 from .progress import ProgressTracker
+from .storage import write_json_atomic
 from .wechat import WeChatApiError
+
+SAVE_EVERY_N_ARTICLES = 10
 
 
 @dataclass
@@ -137,9 +139,10 @@ class Archiver:
     ) -> Tuple[int, List[Dict[str, Any]]]:
         records: List[Dict[str, Any]] = []
         count = 0
+        successful = 0
         for article in articles:
             count += 1
-            self.progress.start_item("article", article.title, article.key)
+            self.progress.start_item("article", article.title, article.key, save=False)
             try:
                 record = self.write_article(article)
             except Exception as exc:
@@ -147,9 +150,16 @@ class Archiver:
                 print(f"Failed [{article.source}] {article.title}: {exc}")
                 continue
             records.append(record)
-            self.record_article_result(article, record)
+            successful += 1
+            self.record_article_result(
+                article,
+                record,
+                save_now=successful % SAVE_EVERY_N_ARTICLES == 0,
+            )
             if not show_progress:
                 print(f"Saved [{article.source}] {article.title}")
+        self.manifest.save()
+        self.progress.save()
         return count, records
 
     def _archive_articles_parallel(
@@ -157,10 +167,11 @@ class Archiver:
     ) -> Tuple[int, List[Dict[str, Any]]]:
         records: List[Dict[str, Any]] = []
         count = 0
+        successful = 0
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {}
             for article in articles:
-                self.progress.start_item("article", article.title, article.key)
+                self.progress.start_item("article", article.title, article.key, save=False)
                 future = executor.submit(self.write_article, article, AssetDownloader())
                 futures[future] = article
 
@@ -174,21 +185,31 @@ class Archiver:
                     print(f"Failed [{article.source}] {article.title}: {exc}")
                     continue
                 records.append(record)
-                self.record_article_result(article, record)
+                successful += 1
+                self.record_article_result(
+                    article,
+                    record,
+                    save_now=successful % SAVE_EVERY_N_ARTICLES == 0,
+                )
                 if not show_progress:
                     print(f"Saved [{article.source}] {article.title}")
+        self.manifest.save()
+        self.progress.save()
         return count, records
 
-    def record_article_result(self, article: Article, record: Dict[str, Any]) -> None:
+    def record_article_result(
+        self, article: Article, record: Dict[str, Any], save_now: bool = True
+    ) -> None:
         self.remove_duplicate_articles(article.key, record)
         self.manifest.record_article(article.key, record)
         for asset in record.get("assets", []):
             url = asset.get("url")
             if url:
                 self.manifest.record_asset(url, asset)
-        self.manifest.save()
-        self.progress.record_assets(record.get("assets", []))
-        self.progress.finish_item("article", article.title, article.key)
+        if save_now:
+            self.manifest.save()
+        self.progress.record_assets(record.get("assets", []), save=save_now)
+        self.progress.finish_item("article", article.title, article.key, save=save_now)
 
     def remove_duplicate_articles(self, key: str, record: Dict[str, Any]) -> None:
         identity = article_record_identity(record)
@@ -222,10 +243,7 @@ class Archiver:
         (article_dir / "index.html").write_text(document, encoding="utf-8")
 
         metadata = article_metadata(article, assets, article_dir, self.archive_dir)
-        (article_dir / "metadata.json").write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_json_atomic(article_dir / "metadata.json", metadata)
 
         return metadata
 
@@ -296,10 +314,7 @@ class Archiver:
                     "资源需手动处理": count_assets(assets, "needs_manual_fetch"),
                 }
             )
-        (self.archive_dir / "articles_readable.json").write_text(
-            json.dumps(readable, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_json_atomic(self.archive_dir / "articles_readable.json", readable)
 
     def download_materials(self, material_type: str, show_progress: bool = False) -> int:
         output_dir = self.archive_dir / "materials" / sanitize_filename(material_type)

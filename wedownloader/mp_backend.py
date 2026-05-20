@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from .archive import Article
+from .storage import write_json_atomic
 
 
 MP_BASE = "https://mp.weixin.qq.com"
@@ -54,19 +55,15 @@ class MpSession:
         return cls(token=token, cookie=cookie, login_at=login_at, fakeid=fakeid)
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "token": self.token,
-                    "cookie": self.cookie,
-                    "login_at": self.login_at,
-                    "fakeid": self.fakeid,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        write_json_atomic(
+            path,
+            {
+                "token": self.token,
+                "cookie": self.cookie,
+                "login_at": self.login_at,
+                "fakeid": self.fakeid,
+            },
+            private=True,
         )
 
     def age_seconds(self) -> int:
